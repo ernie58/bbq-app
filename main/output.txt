@@ -1,0 +1,434 @@
+==== DataEvent.h ====
+#include <map>
+#include <string>
+#include <variant>
+#include <optional>
+
+using PropertyValue = std::variant<int, float, std::string>;
+
+struct DataEvent {
+    std::map<std::string, PropertyValue> properties;
+
+    template <typename T>
+    std::optional<T> getProperty(const std::string& key) const {
+        auto it = properties.find(key);
+        if (it != properties.end() && std::holds_alternative<T>(it->second)) {
+            return std::get<T>(it->second);
+        }
+        return std::nullopt;
+    }
+};
+
+==== EventBus.h ====
+#ifndef EVENT_BUS_H
+#define EVENT_BUS_H
+
+#include <map>
+#include <vector>
+#include <functional>
+
+// TypeID function using unique static addresses
+template <typename T>
+const void* TypeID() {
+    static const char id = 0;  // Static variable with unique address
+    return &id;
+}
+
+class EventBus {
+private:
+    // Map of type IDs to handlers
+    std::map<const void*, std::vector<std::function<void(const void*)>>> handlers;
+
+public:
+    // Subscribe to an event type
+    template <typename T, typename Handler>
+    void subscribe(Handler&& handler) {
+        auto& typeHandlers = handlers[TypeID<T>()];
+        typeHandlers.push_back([h = std::forward<Handler>(handler)](const void* event) {
+            h(*static_cast<const T*>(event));
+        });
+    }
+
+    // Emit an event type
+    template <typename T>
+    void emit(const T& event) {
+        auto it = handlers.find(TypeID<T>());
+        if (it != handlers.end()) {
+            for (auto& handler : it->second) {
+                handler(&event);
+            }
+        }
+    }
+};
+
+#endif
+
+==== FanService.cpp ====
+#include "FanService.h"
+#include "DataEvent.h"
+#include <Arduino.h>
+
+FanService::FanService(int pin) : pin(pin) {
+
+}
+
+void FanService::initializeFan() {
+  pinMode(pin, OUTPUT);
+  analogWriteFreq(25000);
+  analogWrite(pin, 0);
+}
+
+void FanService::handleSpeedEvent(int speed) {
+    Serial.println("Fan speed set to: " + String(speed));
+    int mappedSpeed = map(speed, 0,100,0,255);
+    analogWrite(pin, mappedSpeed);
+}
+
+void FanService::subscribeToEventBus(EventBus* eventBus) {
+    eventBus->subscribe<DataEvent>([this](const DataEvent& event) {
+        if (auto fanSpeedOpt = event.getProperty<int>("speed")) {
+            handleSpeedEvent(*fanSpeedOpt);
+        }
+    });
+}
+==== FanService.h ====
+#ifndef FAN_SERVICE_H
+#define FAN_SERVICE_H
+
+#include "EventBus.h"
+#include <Arduino.h>
+
+class FanService {
+private:
+    int pin;
+
+public:
+    FanService(int pin);
+    void initializeFan();
+    void handleSpeedEvent(int speed); // Method to handle speed events
+    void subscribeToEventBus(EventBus* eventBus);
+    void loop();
+};
+
+#endif
+
+==== ServoService.cpp ====
+#include "ServoService.h"
+#include "DataEvent.h"
+
+
+ServoService::ServoService(int pin) : pin(pin), currentAngle(1000) {
+
+}
+
+void ServoService::initializeServo() {
+    servo.attach(pin, 1000, 2000);
+    servo.writeMicroseconds(currentAngle); // Set initial position
+}
+
+void ServoService::handleAngleEvent(int angle) {
+    // if (angle >= 0 && angle <= 180) { // Valid angle range
+        currentAngle = angle;
+        Serial.println("Servo angle set to: " + String(angle));
+        servo.writeMicroseconds(currentAngle);
+    // }
+}
+
+void ServoService::subscribeToEventBus(EventBus* eventBus) {
+    eventBus->subscribe<DataEvent>([this](const DataEvent& event) {
+        if (auto angleOpt = event.getProperty<int>("angle")) {
+            handleAngleEvent(*angleOpt);
+        }
+    });
+}
+==== ServoService.h ====
+#ifndef SERVO_SERVICE_H
+#define SERVO_SERVICE_H
+
+#include <Servo.h>
+#include "EventBus.h"
+
+class ServoService {
+private:
+    Servo servo;
+    int pin;
+    int currentAngle;
+
+public:
+    ServoService(int pin);
+    void initializeServo();
+    void handleAngleEvent(int angle); // Method to handle angle events
+    void subscribeToEventBus(EventBus* eventBus);
+    void loop();
+};
+
+#endif
+
+==== ThermocoupleService.cpp ====
+#include "ThermocoupleService.h"
+#include "DataEvent.h"
+#include <Arduino.h>
+
+ThermocoupleService::ThermocoupleService(int sckPin, int csPin, int soPin)
+    : csPin(csPin), sckPin(sckPin), soPin(soPin), thermocouple(sckPin, csPin, soPin), eventBus(nullptr) {}
+
+void ThermocoupleService::initializeThermocouple() {
+    Serial.println("Thermocouple initialized");
+}
+
+void ThermocoupleService::readTemperature() {
+    double temperature = thermocouple.readCelsius();
+    if (isnan(temperature)) {
+        Serial.println("Error reading temperature from thermocouple");
+        return;
+    }
+
+    Serial.println("Temperature: " + String(temperature) + " °C");
+
+    // Emit temperature event to EventBus
+    if (eventBus) {
+        DataEvent event;
+        event.properties["temperature"] = static_cast<float>(temperature);
+        eventBus->emit(event);
+    }
+}
+
+void ThermocoupleService::subscribeToEventBus(EventBus* eventBus) {
+    this->eventBus = eventBus;  // Store reference to EventBus
+}
+
+==== ThermocoupleService.h ====
+#ifndef THERMOCOUPLE_SERVICE_H
+#define THERMOCOUPLE_SERVICE_H
+
+#include "EventBus.h"
+#include <max6675.h>
+
+class ThermocoupleService {
+private:
+    int csPin;
+    int sckPin;
+    int soPin;
+    MAX6675 thermocouple;
+    EventBus* eventBus; 
+
+
+public:
+    ThermocoupleService(int sckPin, int csPin, int soPin);
+    void initializeThermocouple();
+    void readTemperature();
+    void subscribeToEventBus(EventBus* eventBus);
+};
+
+#endif
+==== WebSocket.cpp ====
+#include "WebSocket.h"
+#include <ESPAsyncWebServer.h>
+#include <ESPAsyncTCP.h>
+#include <ArduinoJson.h>
+#include "DataEvent.h"
+#include "EventBus.h"
+
+AsyncWebServer* server;
+AsyncWebSocket* ws;
+int angle = 0; // Declare the global variable for "angle"
+EventBus* WebSocketService::eventBus = nullptr;
+
+WebSocketService::WebSocketService(const int port, const char* uri, EventBus* eventBus)
+    : port(port), uri(uri) {
+      WebSocketService::eventBus = eventBus;
+    }
+
+void WebSocketService::initializeWebSocketServer() {
+    server = new AsyncWebServer(port);
+    ws = new AsyncWebSocket(uri);
+
+    ws->onEvent([this](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+        onWebSocketEvent(server, client, type, arg, data, len);
+    });
+
+    server->addHandler(ws);
+    server->begin();
+    Serial.println("WebSocket server started");
+}
+
+void WebSocketService::onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
+    if (type == WS_EVT_DATA) {
+        StaticJsonDocument<200> doc;
+        DeserializationError error = deserializeJson(doc, data, len);
+
+        if (error) {
+            Serial.println("JSON deserialization failed: " + String(error.c_str()));
+            return;
+        }
+
+        // Create a DataEvent
+        DataEvent event;
+
+        // Loop through all key-value pairs in the JSON object
+        JsonObject obj = doc.as<JsonObject>();
+        for (JsonPair kv : obj) {
+            String key = kv.key().c_str();
+
+            // Dynamically add properties to the DataEvent
+            if (kv.value().is<int>()) {
+                event.properties[key.c_str()] = kv.value().as<int>();
+            } else if (kv.value().is<float>()) {
+                event.properties[key.c_str()] = kv.value().as<float>();
+            } else if (kv.value().is<const char*>()) {
+                event.properties[key.c_str()] = std::string(kv.value().as<const char*>());
+            }
+        }
+
+        // Emit the DataEvent
+        if (eventBus) {
+            eventBus->emit(event);
+        }
+    }
+}
+
+
+==== WebSocket.h ====
+#ifndef WSSERVICE_H
+#define WSSERVICE_H
+
+#include <ESPAsyncWebServer.h>
+#include <ESPAsyncTCP.h>
+#include "EventBus.h"
+
+class WebSocketService {
+private:
+    const int port;
+    const char* uri;
+    AsyncWebServer* server;
+    AsyncWebSocket* ws;
+
+public:
+    WebSocketService(const int port, const char* uri, EventBus* eventBus);
+    void initializeWebSocketServer();
+    static void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
+    static EventBus* eventBus;
+};
+
+#endif // WSSERVICE_H
+==== Wifi.cpp ====
+#include "Wifi.h"
+#include <ESP8266WiFi.h>
+
+WifiService::WifiService(const char* ssid, const char* password, IPAddress ip, IPAddress gateway, IPAddress subnet)
+    : ssid(ssid), password(password), ip(ip), gateway(gateway), subnet(subnet) {}
+
+void WifiService::initializeWifi() {
+    Serial.println("Connecting to " + String(ssid));
+    WiFi.config(ip, gateway, subnet);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println("WiFi connected");
+    Serial.println(WiFi.localIP());
+}
+
+==== Wifi.h ====
+#ifndef WIFISERVICE_H
+#define WIFISERVICE_H
+
+#include <IPAddress.h>
+
+class WifiService {
+private:
+    const char* ssid;
+    const char* password;
+    IPAddress ip;
+    IPAddress gateway;
+    IPAddress subnet;
+
+public:
+    // Constructor with parameters
+    WifiService(const char* ssid, const char* password, IPAddress ip, IPAddress gateway, IPAddress subnet);
+
+    // Initialize WiFi
+    void initializeWifi();
+};
+
+#endif // WIFISERVICE_H
+
+==== main.ino ====
+#include "Wifi.h"
+#include "WebSocket.h"
+#include "ServoService.h"
+#include "FanService.h"
+#include "EventBus.h"
+#include "ThermocoupleService.h"
+
+// Network parameters
+const char* ssid = "tinternet";
+const char* password = "HamEnKaas!";
+IPAddress ip(192, 168, 3, 150);            // where 150 is the desired IP Address. The first three numbers must be the same as the router IP
+IPAddress gateway(192, 168, 3, 1);  
+IPAddress subnet(255, 255, 255, 0);
+
+// Components
+WifiService* wifiService;
+WebSocketService* wsService;
+ServoService* servoService;
+FanService* fanService;
+ThermocoupleService* thermocoupleService;
+EventBus* eventBus;
+
+void setup() {
+    Serial.begin(74880);
+    delay(500);
+    setupEventBus();
+    setupWifi();
+    setupWebSocket();
+    setupServo();
+    setupFan();
+    setupThermocouple();
+}
+
+void loop() {
+    delay(1000); // WebSocket needs to be polled periodically
+    thermocoupleService->readTemperature(); // Periodically read the temperature
+}
+
+void setupWifi(){
+  WifiService wifiService(ssid, password, ip, gateway, subnet);
+  wifiService.initializeWifi();
+}
+
+void setupEventBus() {
+    eventBus = new EventBus(); // Initialize EventBus
+}
+
+void setupServo() {
+    servoService = new ServoService(5);
+    servoService->initializeServo();
+    servoService->subscribeToEventBus(eventBus); // Subscribe servo to EventBus
+}
+
+void setupWebSocket() {
+    wsService = new WebSocketService(80, "/", eventBus);
+    wsService->initializeWebSocketServer();
+}
+
+void setupFan(){
+  fanService = new FanService(4);
+  fanService->initializeFan();
+  fanService->subscribeToEventBus(eventBus);
+}
+
+void setupThermocouple() {
+    // Define pins for the MAX6675 (example: SCK = D5, CS = D6, SO = D7)
+    const int sckPin = 14; // Replace with your actual pin numbers
+    const int csPin = 12;
+    const int soPin = 13;
+
+    thermocoupleService = new ThermocoupleService(sckPin, csPin, soPin);
+    thermocoupleService->initializeThermocouple();
+    thermocoupleService->subscribeToEventBus(eventBus);
+}

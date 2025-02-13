@@ -1,0 +1,15 @@
+<mat-card>
+    <div [formGroup]="controlForm">
+      <mat-slide-toggle formControlName="mode">Automatic Mode</mat-slide-toggle>
+      @if (controlForm.controls['mode'].value === 'automatic') {
+        <mat-form-field>
+          <input matInput type="number" placeholder="Target Temperature" formControlName="targetTemperature">
+        </mat-form-field>
+      }
+      @if (controlForm.controls['mode'].value === 'manual') {
+        <mat-slider min="1000" max="2000" step="10" formControlName="angle"></mat-slider>
+        <mat-slider min="0" max="100" step="1" formControlName="speed"></mat-slider>
+      }
+      <button mat-button (click)="sendControlData()">Send</button>
+    </div>
+  </mat-card>
